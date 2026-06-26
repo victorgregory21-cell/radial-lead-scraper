@@ -121,6 +121,7 @@ def run_scrape(
     workers: int,
     fast: bool,
     max_search_results: int,
+    deep_email_search: bool,
 ) -> List[Dict[str, str]]:
     search_timeout = 5 if fast else 10
     request_timeout = 8 if fast else 16
@@ -157,6 +158,7 @@ def run_scrape(
                 max_pages,
                 domain_cache,
                 contact_cache,
+                deep_email_search,
             ): idx
             for idx, target in enumerate(targets)
         }
@@ -176,7 +178,9 @@ def run_scrape(
                     "Domain": "",
                     "Decision Maker Name": "",
                     "Generated Emails": "",
+                    "Real Found Emails": "",
                     "Public Emails": "",
+                    "Email Sources": "",
                     "Phone Number": "",
                     "Latitude": f"{target.lat:.7f}",
                     "Longitude": f"{target.lon:.7f}",
@@ -322,6 +326,11 @@ with st.sidebar:
             step=1,
             help="How many web-search results to check per business. Higher may improve results but is slower.",
         )
+        deep_email_search = st.checkbox(
+            "Deep email search",
+            value=False,
+            help="Slower. Searches public external profile/search-result pages for more found emails. Leave off for normal use.",
+        )
 
     run_button = st.button("Find Leads", type="primary", use_container_width=True)
 
@@ -355,6 +364,7 @@ if run_button:
                     workers=workers,
                     fast=fast,
                     max_search_results=max_search_results,
+                    deep_email_search=deep_email_search,
                 )
             except RuntimeError as exc:
                 st.error(str(exc))

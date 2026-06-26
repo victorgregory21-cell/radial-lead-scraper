@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import html
+import io
 import math
 import os
 import random
@@ -32,6 +34,11 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
+
+try:
+    from pypdf import PdfReader
+except Exception:
+    PdfReader = None
 
 
 APP_USER_AGENT = "radial-lead-scraper/1.0 (open-source; local-user)"
@@ -82,12 +89,85 @@ CSV_COLUMNS = [
     "Domain",
     "Decision Maker Name",
     "Generated Emails",
+    "Real Found Emails",
     "Public Emails",
+    "Email Sources",
     "Phone Number",
     "Latitude",
     "Longitude",
     "Source",
 ]
+
+EXTERNAL_EMAIL_SOURCE_DOMAINS = {
+    "linkedin.com",
+    "rocketreach.co",
+    "apollo.io",
+    "signalhire.com",
+    "lusha.com",
+    "clay.earth",
+    "contactout.com",
+    "zoominfo.com",
+    "hunter.io",
+    "leadIQ.com".lower(),
+    "crunchbase.com",
+    "facebook.com",
+    "instagram.com",
+    "x.com",
+    "twitter.com",
+}
+
+EMAIL_NOISE_DOMAINS = {
+    "sentry.wixpress.com",
+    "sentry-next.wixpress.com",
+}
+
+EMAIL_NOISE_PATTERNS = (
+    "polyfill@",
+    "example@",
+    "email@email.com",
+)
+
+LIKELY_SUBPAGE_PATHS = [
+    "contact",
+    "contact-us",
+    "contacts",
+    "about",
+    "about-us",
+    "team",
+    "our-team",
+    "staff",
+    "people",
+    "leadership",
+    "leaders",
+    "management",
+    "managers",
+    "doctors",
+    "dentists",
+    "physicians",
+    "therapists",
+    "partners",
+    "founders",
+    "careers",
+    "press",
+    "media",
+    "events",
+    "reservations",
+    "reservation",
+    "booking",
+    "book",
+    "enquiry",
+    "enquiries",
+    "inquiry",
+    "support",
+    "locations",
+    "location",
+    "branches",
+    "outlets",
+    "privacy",
+    "terms",
+]
+
+DOCUMENT_EXTENSIONS = (".pdf", ".doc", ".docx", ".txt")
 
 OTA_AND_DIRECTORY_BLOCKLIST = {
     "agoda.com",
@@ -175,6 +255,27 @@ class Target:
 class Contacts:
     emails: Set[str] = field(default_factory=set)
     phones: Set[str] = field(default_factory=set)
+    email_sources: Dict[str, Set[str]] = field(default_factory=dict)
+
+    def add_email(self, email: str, source: str) -> None:
+        cleaned = clean_email(email)
+        if not valid_email(cleaned):
+            return
+        self.emails.add(cleaned)
+        self.email_sources.setdefault(cleaned, set()).add(source)
+
+    def add_emails(self, emails: Iterable[str], source: str) -> None:
+        for email in emails:
+            self.add_email(email, source)
+
+    def add_phone(self, phone: str) -> None:
+        cleaned = normalize_phone(phone)
+        if cleaned:
+            self.phones.add(cleaned)
+
+    def add_phones(self, phones: Iterable[str]) -> None:
+        for phone in phones:
+            self.add_phone(phone)
 
 
 def log(msg: str) -> None:
@@ -491,6 +592,12 @@ def valid_email(email: str) -> bool:
     local, domain = email.split("@", 1)
     if not local or not domain or "." not in domain:
         return False
+    if domain in EMAIL_NOISE_DOMAINS:
+        return False
+    if any(pattern in email for pattern in EMAIL_NOISE_PATTERNS):
+        return False
+    if re.fullmatch(r"[a-f0-9]{24,}", local):
+        return False
     suffix = domain.rsplit(".", 1)[-1]
     if not suffix.isalpha() or len(suffix) < 2:
         return False
@@ -520,6 +627,11 @@ def extract_contacts(text: str) -> Contacts:
     phones = {normalize_phone(p) for p in PHONE_RE.findall(text or "")}
     phones = {p for p in phones if p}
     return Contacts(emails=emails, phones=phones)
+
+
+def merge_contacts(target: Contacts, found: Contacts, source: str) -> None:
+    target.add_emails(found.emails, source)
+    target.add_phones(found.phones)
 
 
 def normalize_domain(url: str) -> str:
@@ -607,6 +719,44 @@ def discover_decision_maker(name: str, business_type: str, max_results: int, tim
     return ""
 
 
+def discover_external_profile_emails(
+    name: str,
+    domain: str,
+    business_type: str,
+    max_results: int,
+    timeout: int,
+) -> Contacts:
+    contacts = Contacts()
+    if not name:
+        return contacts
+
+    queries = [
+        f'"{name}" "@{domain}"' if domain else f'"{name}" email',
+        f'"{name}" "{business_type}" email',
+        f'"{name}" (email OR contact) (LinkedIn OR RocketReach OR Apollo OR SignalHire OR Lusha)',
+        f'site:rocketreach.co "{name}" email',
+        f'site:linkedin.com/in/ "{name}" "{business_type}"',
+    ]
+    for query in queries:
+        for result in ddgs_search(query, max_results=max_results, timeout=timeout):
+            url = result.get("href") or result.get("url") or ""
+            source_domain = normalize_domain(url) or (urlparse(url).netloc or "external").lower()
+            blob = f"{result.get('title','')} {result.get('body','')} {url}"
+            found = extract_contacts(blob)
+            if not found.emails:
+                continue
+            for email in found.emails:
+                email_domain = email.split("@", 1)[-1]
+                if domain and email_domain != domain:
+                    continue
+                if source_domain in EXTERNAL_EMAIL_SOURCE_DOMAINS or (domain and email_domain == domain):
+                    local = email.split("@", 1)[0]
+                    if any(token in local for token in ("first", "last", "john", "jane", "example")):
+                        continue
+                    contacts.add_email(email, f"search:{source_domain}")
+    return contacts
+
+
 def generate_emails(person_name: str, domain: str) -> str:
     if not person_name or not domain:
         return ""
@@ -632,6 +782,31 @@ def fetch_html(session: requests.Session, url: str, timeout: int) -> str:
         return ""
 
 
+def fetch_text_resource(session: requests.Session, url: str, timeout: int, max_bytes: int = 2_000_000) -> str:
+    try:
+        response = session.get(url, headers=BROWSER_HEADERS, timeout=(5, timeout), allow_redirects=True)
+        if response.status_code >= 400:
+            return ""
+        content = response.content[:max_bytes]
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        lower_url = url.lower().split("?", 1)[0]
+
+        if lower_url.endswith(".pdf") or "application/pdf" in content_type:
+            if PdfReader is None:
+                return ""
+            try:
+                reader = PdfReader(io.BytesIO(content))
+                return "\n".join((page.extract_text() or "") for page in reader.pages[:5])
+            except Exception:
+                return ""
+
+        if lower_url.endswith(".txt") or "text/plain" in content_type or "xml" in content_type:
+            return content.decode(response.encoding or "utf-8", errors="ignore")
+    except Exception:
+        return ""
+    return ""
+
+
 def domain_matches(url: str, domain: str) -> bool:
     host = (urlparse(url).netloc or "").lower().replace("www.", "")
     return host == domain or host.endswith("." + domain)
@@ -646,44 +821,121 @@ def priority_links(base_url: str, html: str, domain: str, max_pages: int) -> Lis
             continue
         path = (urlparse(link).path or "").lower()
         score = 1
-        if any(k in path for k in ("contact", "about", "team", "leadership", "management", "reservation", "enquiry")):
+        if any(k in path for k in LIKELY_SUBPAGE_PATHS):
             score = 0
         links.append((score, link))
     links = sorted(set(links), key=lambda x: (x[0], x[1]))
     return [u for _, u in links[:max_pages]]
 
 
-def scrape_public_contacts(domain: str, timeout: int, max_pages: int) -> Contacts:
+def discover_sitemap_and_robot_urls(session: requests.Session, domain: str, timeout: int, max_urls: int) -> List[str]:
+    candidates = [
+        f"https://{domain}/sitemap.xml",
+        f"https://{domain}/sitemap_index.xml",
+        f"https://{domain}/robots.txt",
+    ]
+    discovered = []
+    for url in candidates:
+        text = fetch_text_resource(session, url, timeout=timeout)
+        if not text:
+            continue
+        for match in re.findall(r"https?://[^\s<>'\"]+", text):
+            clean_url = html.unescape(match).strip()
+            if domain_matches(clean_url, domain):
+                path = urlparse(clean_url).path.lower()
+                if any(k in path for k in LIKELY_SUBPAGE_PATHS) or path.endswith(DOCUMENT_EXTENSIONS):
+                    discovered.append(clean_url)
+        if url.endswith("robots.txt"):
+            for sitemap in re.findall(r"(?im)^sitemap:\s*(\S+)", text):
+                if domain_matches(sitemap, domain):
+                    discovered.append(sitemap.strip())
+    return sorted(set(discovered))[:max_urls]
+
+
+def discover_document_urls(name: str, domain: str, max_results: int, timeout: int) -> List[str]:
+    if not domain:
+        return []
+    queries = [
+        f'site:{domain} filetype:pdf email',
+        f'site:{domain} filetype:pdf "@{domain}"',
+        f'"{name}" "@{domain}" filetype:pdf',
+        f'site:{domain} (contact OR press OR media OR menu OR brochure) filetype:pdf',
+    ]
+    urls = []
+    for query in queries:
+        for result in ddgs_search(query, max_results=max_results, timeout=timeout):
+            url = result.get("href") or result.get("url") or ""
+            if url and domain_matches(url, domain):
+                urls.append(url)
+    return sorted(set(urls))[:max_results]
+
+
+def seeded_subpage_urls(domain: str, max_pages: int) -> List[str]:
+    urls = [f"https://{domain}", f"http://{domain}"]
+    for path in LIKELY_SUBPAGE_PATHS:
+        urls.append(f"https://{domain}/{path}")
+    return urls[: max(max_pages + 4, 8)]
+
+
+def scrape_public_contacts(
+    domain: str,
+    timeout: int,
+    max_pages: int,
+    name: str = "",
+    deep_email_search: bool = False,
+    search_timeout: int = 5,
+    max_search_results: int = 3,
+) -> Contacts:
     contacts = Contacts()
     if not domain:
         return contacts
     session = requests.Session()
-    seeds = [f"https://{domain}", f"http://{domain}", f"https://{domain}/contact", f"https://{domain}/about"]
+    seeds = seeded_subpage_urls(domain, max_pages=max_pages)
+    if deep_email_search:
+        seeds.extend(discover_sitemap_and_robot_urls(session, domain, timeout=timeout, max_urls=max_pages * 2))
+        seeds.extend(discover_document_urls(name, domain, max_results=max_search_results, timeout=search_timeout))
     visited = set()
     for seed in seeds:
         if seed in visited:
             continue
         visited.add(seed)
+        if seed.lower().split("?", 1)[0].endswith(DOCUMENT_EXTENSIONS):
+            text_resource = fetch_text_resource(session, seed, timeout=timeout)
+            if not text_resource:
+                continue
+            found = extract_contacts(text_resource)
+            merge_contacts(contacts, found, seed)
+            continue
+
         html = fetch_html(session, seed, timeout=timeout)
         if not html:
             continue
         text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
         found = extract_contacts(f"{html} {text}")
-        contacts.emails.update(found.emails)
-        contacts.phones.update(found.phones)
+        merge_contacts(contacts, found, seed)
+
+        soup = BeautifulSoup(html, "html.parser")
+        for mailto in soup.select("a[href^='mailto:']"):
+            email = (mailto.get("href") or "").replace("mailto:", "").split("?")[0]
+            contacts.add_email(email, f"mailto:{seed}")
+        for tel in soup.select("a[href^='tel:']"):
+            contacts.add_phone((tel.get("href") or "").replace("tel:", ""))
+
         for link in priority_links(seed, html, domain, max_pages=max_pages):
             if link in visited:
                 continue
             visited.add(link)
+            if link.lower().split("?", 1)[0].endswith(DOCUMENT_EXTENSIONS):
+                doc_text = fetch_text_resource(session, link, timeout=timeout)
+                if doc_text:
+                    merge_contacts(contacts, extract_contacts(doc_text), link)
+                continue
             sub_html = fetch_html(session, link, timeout=timeout)
             if not sub_html:
                 continue
             sub_text = BeautifulSoup(sub_html, "html.parser").get_text(" ", strip=True)
             sub_found = extract_contacts(f"{sub_html} {sub_text}")
-            contacts.emails.update(sub_found.emails)
-            contacts.phones.update(sub_found.phones)
-        if contacts.emails or contacts.phones:
-            break
+            merge_contacts(contacts, sub_found, link)
     return contacts
 
 
@@ -693,6 +945,17 @@ def pick_emails(domain: str, emails: Iterable[str]) -> str:
     role = [e for e in same_domain if re.match(r"^(info|contact|hello|sales|booking|reservations|enquiry|inquiry|admin)@", e)]
     ordered = role + [e for e in same_domain if e not in role] + [e for e in cleaned if e not in same_domain]
     return " | ".join(ordered[:10])
+
+
+def email_sources_summary(contacts: Contacts, max_items: int = 10) -> str:
+    parts = []
+    for email in sorted(contacts.emails)[:max_items]:
+        sources = sorted(contacts.email_sources.get(email, []))[:3]
+        if sources:
+            parts.append(f"{email} <= {', '.join(sources)}")
+        else:
+            parts.append(email)
+    return " | ".join(parts)
 
 
 def pick_phone(phones: Iterable[str]) -> str:
@@ -708,6 +971,7 @@ def enrich_target(
     max_pages: int,
     domain_cache: Dict[str, str],
     contact_cache: Dict[str, Contacts],
+    deep_email_search: bool = False,
 ) -> Dict[str, str]:
     key = hashlib.sha1(f"{target.name}|{business_type}".encode("utf-8")).hexdigest()
     domain = domain_cache.get(key)
@@ -728,16 +992,36 @@ def enrich_target(
 
     contacts = contact_cache.get(domain) if domain else Contacts()
     if domain and contacts is None:
-        contacts = scrape_public_contacts(domain, timeout=request_timeout, max_pages=max_pages)
+        contacts = scrape_public_contacts(
+            domain,
+            timeout=request_timeout,
+            max_pages=max_pages,
+            name=target.name,
+            deep_email_search=deep_email_search,
+            search_timeout=search_timeout,
+            max_search_results=max_search_results,
+        )
         contact_cache[domain] = contacts
     if contacts is None:
         contacts = Contacts()
     osm_email = clean_email(target.email)
     if osm_email and valid_email(osm_email):
-        contacts.emails.add(osm_email)
+        contacts.add_email(osm_email, "osm")
     osm_phone = normalize_phone(target.phone)
     if osm_phone:
-        contacts.phones.add(osm_phone)
+        contacts.add_phone(osm_phone)
+
+    if deep_email_search:
+        external_contacts = discover_external_profile_emails(
+            target.name,
+            domain,
+            business_type,
+            max_results=max(3, min(max_search_results, 8)),
+            timeout=search_timeout,
+        )
+        for email, sources in external_contacts.email_sources.items():
+            for source in sources:
+                contacts.add_email(email, source)
 
     return {
         "Distance (km)": f"{target.distance_km:.3f}",
@@ -747,7 +1031,9 @@ def enrich_target(
         "Domain": domain,
         "Decision Maker Name": decision_maker,
         "Generated Emails": generated,
+        "Real Found Emails": pick_emails(domain, contacts.emails),
         "Public Emails": pick_emails(domain, contacts.emails),
+        "Email Sources": email_sources_summary(contacts),
         "Phone Number": pick_phone(contacts.phones),
         "Latitude": f"{target.lat:.7f}",
         "Longitude": f"{target.lon:.7f}",
@@ -783,6 +1069,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--max-search-results", type=int, default=8)
+    parser.add_argument(
+        "--deep-email-search",
+        action="store_true",
+        help="Slower: searches external public profile/search-result pages for additional found emails.",
+    )
     return parser.parse_args()
 
 
@@ -845,6 +1136,7 @@ def main() -> None:
                 max_pages,
                 domain_cache,
                 contact_cache,
+                args.deep_email_search,
             ): idx
             for idx, target in enumerate(targets)
         }

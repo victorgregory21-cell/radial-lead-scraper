@@ -1,0 +1,2 @@
+Distance (km),Business Name,Business Type,Address,Domain,Decision Maker Name,Generated Emails,Real Found Emails,Public Emails,Email Sources,Phone Number,Latitude,Longitude,Source
+0.047,The Coffee Bean & Tea Leaf,coffee,,coffeebean.com,,,info@coffeebean.com | jdoe@coffeebean.com,info@coffeebean.com | jdoe@coffeebean.com,info@coffeebean.com <= search:coffeebean.com | jdoe@coffeebean.com <= search:rocketreach.co,0157475686,37.4956205,127.0282691,osm

@@ -161,7 +161,7 @@ Dashboard input form:
 CSV preview:
 
 ```text
-Distance | Business Name      | Domain                | Public Emails
+Distance | Business Name      | Domain                | Real Found Emails
 0.000    | Demo Hotel         | demohotel.example     | hello@demohotel.example
 0.142    | Demo Dental Studio | demodental.example    | hello@demodental.example
 ```
@@ -416,8 +416,10 @@ The CSV contains these columns:
 | `Address` | Best available address from OpenStreetMap tags. |
 | `Domain` | Likely official domain found through public web search. |
 | `Decision Maker Name` | Possible decision-maker name from public search snippets. |
-| `Generated Emails` | Email permutations generated from decision-maker name and domain. |
-| `Public Emails` | Public emails scraped from the business website. |
+| `Generated Emails` | Guessed email permutations generated from decision-maker name and domain. These are not found or verified emails. |
+| `Real Found Emails` | Emails actually found in public sources such as websites, OSM tags, `mailto:` links, or public search snippets. |
+| `Public Emails` | Backward-compatible duplicate of found public emails. Prefer `Real Found Emails`. |
+| `Email Sources` | Evidence showing where found emails came from, e.g. website URL, `mailto`, OSM, or search result source. |
 | `Phone Number` | Public phone number scraped from the business website. |
 | `Latitude` | Business latitude. |
 | `Longitude` | Business longitude. |
@@ -441,9 +443,34 @@ The sample uses `.example` domains and fake businesses only. It is safe to commi
 - For custom business types, the scraper falls back to name-based OpenStreetMap matching, which can be broader or weaker than built-in profiles.
 - Very niche categories like `waffle stall` may map to broader OSM tags such as `fast_food` or `bakery`, so results may need manual review.
 - Decision-maker names come from public search snippets and should be treated as leads, not verified identities.
-- Generated email permutations are guesses, not verified deliverable addresses.
-- Public emails and phone numbers are scraped from public-facing websites and can include generic role accounts.
+- `Generated Emails` are guesses only. They are not found emails and are not verified deliverable addresses.
+- `Real Found Emails` are actually found in public places, including business websites, `mailto:` links, OSM tags, and public search snippets from related websites such as LinkedIn/RocketReach-style pages.
+- Public emails and phone numbers can include generic role accounts.
 - `Domain` is a best-effort official-site guess. Directory, social, and OTA domains are filtered, but manual review is still recommended.
+
+## Email Discovery Notes
+
+The scraper separates guessed emails from found emails:
+
+- `Generated Emails`: guessed from a decision-maker name and domain, e.g. `john.smith@example.com`. These may not exist.
+- `Real Found Emails`: emails actually found in public sources.
+- `Email Sources`: where the found emails came from.
+
+The scraper looks for real emails in:
+
+- OpenStreetMap email/contact tags
+- Home page
+- Contact pages
+- About pages
+- Team/staff/people pages
+- Leadership/management pages
+- Doctors/dentists/therapists pages
+- Booking/reservation/enquiry pages
+- Careers/press/media/events pages
+- `mailto:` links
+- Public search snippets from related websites including LinkedIn, RocketReach, Apollo, SignalHire, Lusha, Crunchbase, and similar sources
+
+It does not use paid APIs and does not verify mailbox deliverability.
 
 ## Performance Tips
 

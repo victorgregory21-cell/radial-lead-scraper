@@ -4,3 +4,4 @@ geopy
 ddgs
 tldextract
 streamlit
+pypdf
