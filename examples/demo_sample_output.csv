@@ -1,0 +1,3 @@
+Distance (km),Business Name,Business Type,Address,Domain,Decision Maker Name,Generated Emails,Public Emails,Phone Number,Latitude,Longitude,Source
+0.142,Demo Dental Studio,dental clinic,"12 Example Street, Demo City",demodental.example,Avery Tan,avery.tan@demodental.example | atan@demodental.example | avery@demodental.example,hello@demodental.example,+6512345678,1.3000000,103.8000000,osm
+0.388,Example Specialty Coffee,specialty coffee,"88 Sample Lane, Demo City",examplecoffee.example,Jordan Lee,jordan.lee@examplecoffee.example | jlee@examplecoffee.example | jordan@examplecoffee.example,contact@examplecoffee.example,+6598765432,1.3010000,103.8010000,osm

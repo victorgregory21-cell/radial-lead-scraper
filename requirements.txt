@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+geopy
+ddgs
+tldextract
+streamlit
