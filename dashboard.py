@@ -78,8 +78,9 @@ def check_password() -> bool:
     expected_password = get_config_secret("APP_PASSWORD")
 
     if not expected_user or not expected_password:
-        st.warning("Dashboard login is not configured. Set APP_USERNAME and APP_PASSWORD in hosting secrets.")
-        return True
+        st.error("Dashboard login is not configured.")
+        st.info("Set APP_USERNAME and APP_PASSWORD in Streamlit secrets or environment variables before using the dashboard.")
+        return False
 
     if st.session_state.get("authenticated"):
         return True
