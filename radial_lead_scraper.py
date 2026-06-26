@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import math
 import os
 import random
 import re
@@ -37,6 +38,17 @@ APP_USER_AGENT = "radial-lead-scraper/1.0 (open-source; local-user)"
 DEFAULT_OUTPUT = "leads_radial.csv"
 DEFAULT_RADIUS_KM = 15.0
 DEFAULT_LIMIT = 100
+DEFAULT_WORKERS = 8
+
+KNOWN_PLACE_ALIASES: Dict[str, Tuple[float, float]] = {
+    "marina bay sands": (1.2836965, 103.8607226),
+    "marina bay sands singapore": (1.2836965, 103.8607226),
+    "mbs singapore": (1.2836965, 103.8607226),
+    "grand indonesia": (-6.195122, 106.820558),
+    "grand indonesia jakarta": (-6.195122, 106.820558),
+    "grand indonesia shopping town": (-6.195122, 106.820558),
+    "plaza indonesia": (-6.193925, 106.822215),
+}
 
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -99,6 +111,9 @@ OTA_AND_DIRECTORY_BLOCKLIST = {
     "doctoranywhere.com",
     "dentaldepartures.com",
     "medicaldepartures.com",
+    "findglocal.com",
+    "tiktok.com",
+    "parisinsidersguide.com",
     "linkedin.com",
     "facebook.com",
     "instagram.com",
@@ -151,6 +166,9 @@ class Target:
     distance_km: float
     address: str = ""
     source: str = "osm"
+    website: str = ""
+    email: str = ""
+    phone: str = ""
 
 
 @dataclass
@@ -172,9 +190,66 @@ def normalize_key(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
-def geocode_address(address: str) -> Optional[Tuple[float, float]]:
+def build_structured_address(
+    place: str = "",
+    street: str = "",
+    city: str = "",
+    region: str = "",
+    country: str = "",
+    postal_code: str = "",
+) -> str:
+    parts = [place, street, city, region, postal_code, country]
+    return ", ".join(part.strip() for part in parts if part and part.strip())
+
+
+def parse_coordinates(text: str) -> Optional[Tuple[float, float]]:
+    cleaned = (text or "").strip()
+    match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", cleaned)
+    if not match:
+        return None
+    lat = float(match.group(1))
+    lon = float(match.group(2))
+    if -90 <= lat <= 90 and -180 <= lon <= 180:
+        return (lat, lon)
+    return None
+
+
+def address_variants(address: str) -> List[str]:
+    original = (address or "").strip()
+    if not original:
+        return []
+    variants = [original]
+    compact = re.sub(r"\s+", " ", original)
+    variants.append(compact)
+
+    lowered = compact.lower()
+    if "singapore" not in lowered and any(token in lowered for token in ("marina bay", "killiney", "raffles place", "orchard")):
+        variants.append(f"{compact}, Singapore")
+    if "jakarta" not in lowered and "indonesia" not in lowered and any(token in lowered for token in ("grand indonesia", "plaza indonesia", "thamrin")):
+        variants.append(f"{compact}, Jakarta, Indonesia")
+    if lowered == "grand indonesia":
+        variants.extend(
+            [
+                "Grand Indonesia Shopping Town, Jakarta, Indonesia",
+                "Jl. M.H. Thamrin No.1, Menteng, Jakarta Pusat, Indonesia",
+            ]
+        )
+    if lowered == "marina bay sands":
+        variants.extend(["Marina Bay Sands Singapore", "10 Bayfront Avenue, Singapore"])
+
+    deduped = []
+    seen = set()
+    for variant in variants:
+        key = normalize_key(variant)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(variant)
+    return deduped
+
+
+def geocode_nominatim(query: str) -> Optional[Tuple[float, float]]:
     try:
-        loc = Nominatim(user_agent=APP_USER_AGENT, timeout=20).geocode(address, exactly_one=True)
+        loc = Nominatim(user_agent=APP_USER_AGENT, timeout=20).geocode(query, exactly_one=True)
         if loc:
             return (float(loc.latitude), float(loc.longitude))
     except Exception:
@@ -182,9 +257,68 @@ def geocode_address(address: str) -> Optional[Tuple[float, float]]:
     return None
 
 
+def geocode_osm_search(query: str) -> Optional[Tuple[float, float]]:
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "jsonv2", "limit": 1},
+            headers=REQUEST_HEADERS,
+            timeout=(5, 15),
+        )
+        response.raise_for_status()
+        results = response.json()
+        if results:
+            return (float(results[0]["lat"]), float(results[0]["lon"]))
+    except Exception:
+        return None
+    return None
+
+
+def geocode_photon(query: str) -> Optional[Tuple[float, float]]:
+    try:
+        response = requests.get(
+            "https://photon.komoot.io/api/",
+            params={"q": query, "limit": 1},
+            headers=REQUEST_HEADERS,
+            timeout=(5, 15),
+        )
+        response.raise_for_status()
+        features = response.json().get("features", [])
+        if features:
+            lon, lat = features[0]["geometry"]["coordinates"][:2]
+            return (float(lat), float(lon))
+    except Exception:
+        return None
+    return None
+
+
+def geocode_address(address: str) -> Optional[Tuple[float, float]]:
+    coords = parse_coordinates(address)
+    if coords:
+        log("Geocoded from coordinates input.")
+        return coords
+
+    alias = KNOWN_PLACE_ALIASES.get(normalize_key(address))
+    if alias:
+        log("Geocoded from built-in place alias.")
+        return alias
+
+    for variant in address_variants(address):
+        for provider_name, provider in (
+            ("Nominatim", geocode_nominatim),
+            ("OSM Search", geocode_osm_search),
+            ("Photon", geocode_photon),
+        ):
+            coords = provider(variant)
+            if coords:
+                log(f"Geocoded with {provider_name}: {variant}")
+                return coords
+    return None
+
+
 def radius_to_bbox(lat: float, lon: float, radius_km: float) -> Tuple[float, float, float, float]:
     lat_delta = radius_km / 111.0
-    lon_delta = radius_km / max(111.0 * abs(__import__("math").cos(__import__("math").radians(lat))), 1.0)
+    lon_delta = radius_km / max(111.0 * abs(math.cos(math.radians(lat))), 1.0)
     return (lat - lat_delta, lon - lon_delta, lat + lat_delta, lon + lon_delta)
 
 
@@ -252,8 +386,8 @@ def endpoint_alive(url: str, timeout: int) -> bool:
 def query_overpass(query: str, timeout: int) -> List[dict]:
     healthy = [u for u in OVERPASS_ENDPOINTS if endpoint_alive(u, timeout=5)]
     if not healthy:
-        log("[OVERPASS] no healthy mirrors")
-        return []
+        log("[OVERPASS] health checks failed; trying mirrors directly")
+        healthy = OVERPASS_ENDPOINTS
 
     for endpoint in healthy:
         for retry in range(2):
@@ -302,13 +436,29 @@ def target_from_osm(el: dict, seed: Tuple[float, float]) -> Optional[Target]:
         if part
     )
     distance = geodesic(seed, (float(lat), float(lon))).km
-    return Target(name=name, lat=float(lat), lon=float(lon), distance_km=round(distance, 3), address=address)
+    website = tags.get("website") or tags.get("contact:website") or tags.get("url") or ""
+    email = tags.get("email") or tags.get("contact:email") or ""
+    phone = tags.get("phone") or tags.get("contact:phone") or ""
+    return Target(
+        name=name,
+        lat=float(lat),
+        lon=float(lon),
+        distance_km=round(distance, 3),
+        address=address,
+        website=website,
+        email=email,
+        phone=phone,
+    )
 
 
 def discover_targets(address: str, business_type: str, radius_km: float, limit: int, timeout: int) -> List[Target]:
     seed = geocode_address(address)
     if not seed:
-        raise RuntimeError("Could not geocode address")
+        raise RuntimeError(
+            "Could not find that location. Try adding city and country, e.g. "
+            "'Marina Bay Sands Singapore', 'Grand Indonesia, Jakarta, Indonesia', "
+            "or paste coordinates like '1.2837, 103.8607'."
+        )
     log(f"Seed coordinates: {seed[0]:.6f}, {seed[1]:.6f}")
 
     tags = resolve_type_tags(business_type)
@@ -341,14 +491,27 @@ def valid_email(email: str) -> bool:
     local, domain = email.split("@", 1)
     if not local or not domain or "." not in domain:
         return False
+    suffix = domain.rsplit(".", 1)[-1]
+    if not suffix.isalpha() or len(suffix) < 2:
+        return False
+    if re.search(r"@[\d.]+$", email):
+        return False
     return not any(email.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".svg", ".webp"))
 
 
 def normalize_phone(phone: str) -> str:
-    cleaned = re.sub(r"[^+\d]", "", phone)
-    if len(re.sub(r"\D", "", cleaned)) < 8:
+    raw = phone.strip()
+    digits = re.sub(r"\D", "", raw)
+    if not (8 <= len(digits) <= 15):
         return ""
-    return cleaned
+    if len(set(digits)) <= 2:
+        return ""
+    has_phone_shape = raw.startswith("+") or any(ch in raw for ch in " -().") or len(digits) <= 10
+    if not has_phone_shape:
+        return ""
+    if raw.startswith("00") and not raw.startswith("+"):
+        return ""
+    return ("+" + digits) if raw.startswith("+") else digits
 
 
 def extract_contacts(text: str) -> Contacts:
@@ -385,10 +548,10 @@ def ddgs_search(query: str, max_results: int, timeout: int) -> List[dict]:
         return []
 
 
-def discover_domain(name: str, business_type: str, max_results: int, timeout: int) -> str:
+def discover_domain(name: str, business_type: str, max_results: int, timeout: int, address: str = "") -> str:
     tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9]+", name) if len(t) >= 4]
     candidates = []
-    query = f'"{name}" "{business_type}" official website'
+    query = f'"{name}" "{business_type}" "{address}" official website' if address else f'"{name}" "{business_type}" official website'
     for result in ddgs_search(query, max_results=max_results, timeout=timeout):
         domain = normalize_domain(result.get("href") or result.get("url") or "")
         if not domain:
@@ -399,6 +562,8 @@ def discover_domain(name: str, business_type: str, max_results: int, timeout: in
             score -= 3
         if any(tok in blob for tok in tokens):
             score -= 1
+        if tokens and score == 0:
+            continue
         candidates.append((score, domain))
     if not candidates:
         return ""
@@ -547,7 +712,15 @@ def enrich_target(
     key = hashlib.sha1(f"{target.name}|{business_type}".encode("utf-8")).hexdigest()
     domain = domain_cache.get(key)
     if domain is None:
-        domain = discover_domain(target.name, business_type, max_results=max_search_results, timeout=search_timeout)
+        domain = normalize_domain(target.website) if target.website else ""
+        if not domain:
+            domain = discover_domain(
+                target.name,
+                business_type,
+                max_results=max_search_results,
+                timeout=search_timeout,
+                address=target.address,
+            )
         domain_cache[key] = domain
 
     decision_maker = discover_decision_maker(target.name, business_type, max_results=max_search_results, timeout=search_timeout)
@@ -559,6 +732,12 @@ def enrich_target(
         contact_cache[domain] = contacts
     if contacts is None:
         contacts = Contacts()
+    osm_email = clean_email(target.email)
+    if osm_email and valid_email(osm_email):
+        contacts.emails.add(osm_email)
+    osm_phone = normalize_phone(target.phone)
+    if osm_phone:
+        contacts.phones.add(osm_phone)
 
     return {
         "Distance (km)": f"{target.distance_km:.3f}",
@@ -585,12 +764,23 @@ def write_csv(path: str, rows: List[Dict[str, str]]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Free worldwide radial lead scraper")
-    parser.add_argument("--address", required=True, help="Seed address or landmark; not stored except in logs")
+    parser.add_argument(
+        "--address",
+        default="",
+        help="Seed address, landmark, or coordinates. Add city/country for best results.",
+    )
+    parser.add_argument("--place", default="", help="Optional place/landmark/business name, e.g. Marina Bay Sands")
+    parser.add_argument("--street", default="", help="Optional street address, e.g. 10 Bayfront Avenue")
+    parser.add_argument("--city", default="", help="Optional city, e.g. Singapore")
+    parser.add_argument("--region", default="", help="Optional state/region, e.g. NY or Jakarta Pusat")
+    parser.add_argument("--postal-code", default="", help="Optional postal or ZIP code")
+    parser.add_argument("--country", default="", help="Optional country, e.g. Singapore, Indonesia, USA")
+    parser.add_argument("--coords", default="", help="Optional latitude,longitude. This is the most precise input.")
     parser.add_argument("--type", required=True, dest="business_type", help="Business type, e.g. hotel, dental clinic, cafe")
     parser.add_argument("--radius-km", type=float, default=DEFAULT_RADIUS_KM)
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--output", default="", help="CSV output path")
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--max-search-results", type=int, default=8)
     return parser.parse_args()
@@ -598,7 +788,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    output = args.output or f"leads_{slugify(args.business_type)}_{slugify(args.address)[:32]}.csv"
+    seed_input = args.coords.strip() or args.address.strip() or build_structured_address(
+        place=args.place,
+        street=args.street,
+        city=args.city,
+        region=args.region,
+        country=args.country,
+        postal_code=args.postal_code,
+    )
+    if not seed_input:
+        log("[FATAL] Enter --address, --coords, or structured fields like --street --city --country.")
+        return
+
+    output = args.output or f"leads_{slugify(args.business_type)}_{slugify(seed_input)[:32]}.csv"
     search_timeout = 5 if args.fast else 10
     request_timeout = 8 if args.fast else 16
     overpass_timeout = 18 if args.fast else 50
@@ -610,7 +812,7 @@ def main() -> None:
 
     try:
         targets = discover_targets(
-            address=args.address,
+            address=seed_input,
             business_type=args.business_type,
             radius_km=args.radius_km,
             limit=args.limit,

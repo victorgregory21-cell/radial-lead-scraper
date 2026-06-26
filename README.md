@@ -82,6 +82,8 @@ python radial_lead_scraper.py --address "Raffles Place Singapore" --type "cafe" 
 
 The project includes a Streamlit dashboard for non-technical users.
 
+For free self-hosting, use Streamlit Community Cloud. It is simpler for this project than Vercel because this is a Python Streamlit app. Vercel is excellent for JavaScript/Next.js apps, but long-running Python scraping jobs are not a good fit for Vercel serverless time limits.
+
 Install dashboard dependencies:
 
 ```bash
@@ -94,9 +96,31 @@ Run the dashboard:
 streamlit run dashboard.py
 ```
 
+Host it free on Streamlit Community Cloud:
+
+1. Push this repo to GitHub.
+2. Go to `https://share.streamlit.io/`.
+3. Sign in with GitHub.
+4. Create a new app from this repo.
+5. Set the app file to `dashboard.py`.
+6. Add app secrets before sharing the URL:
+
+```toml
+APP_USERNAME = "your-username"
+APP_PASSWORD = "your-password"
+```
+
+7. Deploy.
+
+Your colleagues can then use the app from a normal browser without installing Python.
+
+Do not commit real usernames/passwords to GitHub. Put them in Streamlit app secrets or environment variables only.
+
 The dashboard lets users enter:
 
-- Seed address or public landmark
+- Country
+- Location input method: `Simple`, `Full address`, or `Coordinates`
+- Place name, street address, city, region, postal code, and country when using `Full address`
 - Business type or custom business type
 - Radius in kilometers
 - Max leads
@@ -105,6 +129,16 @@ The dashboard lets users enter:
 - Search results per query
 
 Then it displays the enriched leads in-browser and provides a CSV download button.
+
+Beginner-friendly defaults:
+
+- Use `Full address` if a landmark is not found.
+- Use `Coordinates` if the location still fails.
+- Click `Check Location` before `Find Leads` to confirm the app can find the starting point.
+- Use `Fast mode` on.
+- Keep `Speed level` at `8`.
+- Start with `Maximum leads` between `10` and `25`.
+- Use city and country in the location field.
 
 ## Screenshots
 
@@ -137,6 +171,13 @@ Distance | Business Name      | Domain                | Public Emails
 | Option | Required | Default | Description |
 |---|---:|---:|---|
 | `--address` | Yes | none | Seed address or public landmark to search from. This is used for geocoding and is not written to the CSV. |
+| `--place` | No | empty | Place/landmark/business name for structured address input. |
+| `--street` | No | empty | Street address for structured address input. |
+| `--city` | No | empty | City for structured address input. |
+| `--region` | No | empty | State, province, district, or region for structured address input. |
+| `--postal-code` | No | empty | Postal or ZIP code for structured address input. |
+| `--country` | No | empty | Country for structured address input. |
+| `--coords` | No | empty | Exact `latitude,longitude`. This is the most precise option. |
 | `--type` | Yes | none | Business type to search for, e.g. `hotel`, `dental clinic`, `specialty coffee`, `hair salon`. |
 | `--radius-km` | No | `15.0` | Search radius around the seed point in kilometers. |
 | `--limit` | No | `100` | Maximum number of businesses to enrich after distance sorting. |
@@ -147,7 +188,44 @@ Distance | Business Name      | Domain                | Public Emails
 
 ## Address Input Guidance
 
-`--address` can be a street address, public landmark, neighborhood, city center, or place name that Nominatim can geocode.
+The most reliable input methods are, in order:
+
+1. `Coordinates`: exact latitude/longitude copied from a map.
+2. `Full address`: place name + street + city + country.
+3. `Simple`: landmark or open-ended text.
+
+`--address` can be a street address, public landmark, neighborhood, city center, or place name that free geocoders can resolve.
+
+The app now tries several free geocoding methods automatically:
+
+- Direct latitude/longitude coordinates
+- Built-in aliases for common landmarks such as `Marina Bay Sands Singapore` and `Grand Indonesia`
+- Nominatim geocoding
+- OpenStreetMap search API
+- Photon geocoding fallback
+
+This makes common inputs much more forgiving, but no free geocoder is perfect. If a location still fails, paste coordinates from Google Maps or Apple Maps.
+
+Structured address input is recommended for non-technical users because it reduces ambiguity:
+
+```bash
+radial-leads \
+  --place "Grand Indonesia Shopping Town" \
+  --street "Jl. M.H. Thamrin No.1" \
+  --city "Jakarta" \
+  --region "Jakarta Pusat" \
+  --country "Indonesia" \
+  --type "cafe" \
+  --radius-km 2 \
+  --limit 25 \
+  --fast
+```
+
+Coordinates are the most foolproof option:
+
+```bash
+radial-leads --coords "-6.1951, 106.8206" --type "cafe" --radius-km 2 --limit 25 --fast
+```
 
 Best practice is to include enough geographic context to avoid ambiguity:
 
@@ -169,6 +247,8 @@ Marina Bay Sands Singapore
 Shibuya Station Tokyo, Japan
 Soho London, United Kingdom
 Union Square San Francisco, USA
+1.2837, 103.8607
+-6.1951, 106.8206
 ```
 
 Avoid overly ambiguous addresses like:
@@ -180,6 +260,49 @@ Central Station
 ```
 
 Ambiguous addresses may geocode to the wrong country or city. If the location looks wrong, add city, state/region, postal code, and country.
+
+Coordinates are the most foolproof input. In Google Maps, right-click a location, copy the latitude/longitude, and paste it into the address field.
+
+## Foolproof Location Workflow
+
+For non-technical users, use this order:
+
+1. Try `Full address`.
+2. Click `Check Location` in the dashboard.
+3. If found, click `Find Leads`.
+4. If not found, open Google Maps or Apple Maps.
+5. Search for the place manually.
+6. Copy the exact latitude/longitude.
+7. Switch the dashboard to `Coordinates`.
+8. Paste the coordinates and click `Check Location` again.
+9. Click `Find Leads`.
+
+Coordinates almost always work because they skip name/address ambiguity entirely.
+
+How to copy coordinates:
+
+- Google Maps desktop: right-click the exact place and click the numbers at the top of the menu.
+- Google Maps mobile: long-press the exact place and copy the coordinates shown in the search bar/details.
+- Apple Maps: drop a pin, open the place card, and copy latitude/longitude if available.
+
+## Geocoding Test Results
+
+The following public addresses were tested successfully during development:
+
+| City | Input | Result |
+|---|---|---|
+| Singapore | `3 Killiney Road, Singapore` | Geocoded |
+| Singapore | `10 Bayfront Avenue, Singapore` | Geocoded |
+| Singapore | `1 Fullerton Road, Singapore` | Geocoded |
+| Jakarta | `Jl. M.H. Thamrin No.1, Menteng, Jakarta Pusat, Indonesia` | Geocoded |
+| Jakarta | `Jl. M.H. Thamrin No.28-30, Jakarta Pusat, Indonesia` | Geocoded |
+| Jakarta | `Jl. Jenderal Sudirman Kav. 52-53, Jakarta, Indonesia` | Geocoded |
+| London | `221B Baker Street, London, United Kingdom` | Geocoded |
+| London | `10 Downing Street, London, United Kingdom` | Geocoded |
+| London | `1 Canada Square, London, United Kingdom` | Geocoded |
+| New York | `350 5th Avenue, New York, NY, USA` | Geocoded |
+| New York | `11 Wall Street, New York, NY, USA` | Geocoded |
+| New York | `30 Rockefeller Plaza, New York, NY, USA` | Geocoded |
 
 The seed address is only used to calculate the starting latitude/longitude. It is not written to the output CSV.
 
