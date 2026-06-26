@@ -4,9 +4,7 @@
 from __future__ import annotations
 
 import csv
-import hmac
 import io
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
@@ -61,48 +59,6 @@ COUNTRY_EXAMPLES = {
         "coords": "40.7484, -73.9857",
     },
 }
-
-
-def get_config_secret(name: str, default: str = "") -> str:
-    value = os.getenv(name)
-    if value:
-        return value
-    try:
-        return str(st.secrets.get(name, default))
-    except Exception:
-        return default
-
-
-def check_password() -> bool:
-    expected_user = get_config_secret("APP_USERNAME")
-    expected_password = get_config_secret("APP_PASSWORD")
-
-    if not expected_user or not expected_password:
-        st.error("Dashboard login is not configured.")
-        st.info("Set APP_USERNAME and APP_PASSWORD in Streamlit secrets or environment variables before using the dashboard.")
-        return False
-
-    if st.session_state.get("authenticated"):
-        return True
-
-    st.title("Radial Lead Scraper")
-    st.caption("Private dashboard")
-
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Log in", type="primary")
-
-    if submitted:
-        user_ok = hmac.compare_digest(username, expected_user)
-        password_ok = hmac.compare_digest(password, expected_password)
-        if user_ok and password_ok:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect username or password.")
-
-    return False
 
 
 def rows_to_csv_bytes(rows: List[Dict[str, str]]) -> bytes:
@@ -194,9 +150,6 @@ def run_scrape(
 
 st.title("Find Nearby Business Leads")
 st.caption("Enter a location and business type. Get a downloadable CSV of nearby leads.")
-
-if not check_password():
-    st.stop()
 
 with st.sidebar:
     st.header("1. Where should we search from?")

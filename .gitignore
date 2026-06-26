@@ -9,5 +9,3 @@ opencode.json
 leads_*.csv
 test_*.csv
 !examples/*.csv
-.streamlit/secrets.toml
-!.streamlit/secrets.toml.example

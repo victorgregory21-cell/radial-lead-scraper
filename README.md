@@ -103,18 +103,9 @@ Host it free on Streamlit Community Cloud:
 3. Sign in with GitHub.
 4. Create a new app from this repo.
 5. Set the app file to `dashboard.py`.
-6. Add app secrets before sharing the URL:
-
-```toml
-APP_USERNAME = "your-username"
-APP_PASSWORD = "your-password"
-```
-
-7. Deploy.
+6. Deploy.
 
 Your colleagues can then use the app from a normal browser without installing Python.
-
-Do not commit real usernames/passwords to GitHub. Put them in Streamlit app secrets or environment variables only.
 
 The dashboard lets users enter:
 
