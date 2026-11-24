@@ -28,7 +28,7 @@ LOCATIONS = [
     ("Putrajaya", "Putrajaya"),
     ("Labuan", "Victoria, Labuan"),
 ]
-EMAIL_RE = re.compile(r"^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 COLUMNS = ["State", "City", "Business Name", "Business Type", "Address", "Domain",
            "Public Email", "Email Sources", "Phone Number", "Source"]
 
@@ -79,7 +79,7 @@ def main():
             for row in csv.DictReader(f):
                 # Only include emails explicitly found on public websites/OSM.
                 found = row.get("Real Found Emails") or row.get("Public Emails") or ""
-                for email in re.split(r"\\s*\\|\\s*", found):
+                for email in re.split(r"\s*\|\s*", found):
                     email = email.strip().lower()
                     if not EMAIL_RE.fullmatch(email) or email in excluded:
                         continue
