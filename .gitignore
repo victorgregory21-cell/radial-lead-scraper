@@ -9,3 +9,7 @@ opencode.json
 leads_*.csv
 test_*.csv
 !examples/*.csv
+
+malaysia_do_not_email.csv
+malaysia_scan_parts/
+malaysia_public_business_contacts.csv
