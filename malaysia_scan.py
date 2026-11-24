@@ -41,13 +41,15 @@ def main():
     p.add_argument("--fast", action="store_true")
     p.add_argument("--output", default="malaysia_public_business_contacts.csv")
     p.add_argument("--opt-outs", default="malaysia_do_not_email.csv",
-                   help="Optional CSV with an email column; always excludes known Myroomzie opt-outs")
+                   help="Required private CSV with an email column to exclude opt-outs")
     args = p.parse_args()
     if not 1 <= args.limit <= 100 or not 1 <= args.radius_km <= 50:
         p.error("--limit must be 1..100 and --radius-km 1..50")
 
-    excluded = {"marketing.1@konicaminolta.com", "info@drshal.com", "charlotte@perinsuran.com"}
+    excluded = set()
     optout_path = Path(args.opt_outs)
+    if not optout_path.exists():
+        p.error(f"Missing private suppression list: {optout_path}. Create a CSV with an email header and all opt-outs before scanning.")
     if optout_path.exists():
         with optout_path.open(newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
